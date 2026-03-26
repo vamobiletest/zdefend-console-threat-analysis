@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Threat Export (HAR)</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f6f8;
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        .container {
+            background: #fff;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            padding: 30px;
+            max-width: 800px;
+            width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        h1 {
+            margin-top: 0;
+            color: #333;
+            text-align: center;
+        }
+        textarea {
+            width: 100%;
+            height: 180px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            resize: vertical;
+            font-family: monospace;
+            box-sizing: border-box;
+        }
+        button {
+            margin-top: 10px;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            background-color: #0078d4;
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+        button:disabled {
+            background-color: #999;
+            cursor: not-allowed;
+        }
+        button:hover:not(:disabled) {
+            background-color: #005a9e;
+        }
+        #output {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ccc;
+            min-height: 80px;
+            max-height: 300px;
+            white-space: pre-wrap;
+            background: #f9f9f9;
+            border-radius: 4px;
+            font-family: monospace;
+            overflow-x: auto;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Threat Export from HAR</h1>
+        <label for="harInput">Upload HAR file:</label><br>
+        <input type="file" id="harInput" accept=".har"><br><br>
+        <label for="urlSelect">Choose request URL:</label><br>
+        <select id="urlSelect" style="width:100%; padding:8px;" disabled>
+            <option value="">Please select a URL</option>
+        </select>
+        <br><br>
+        <div id="fieldSelector" style="display:none;">
+            <label>Select columns to include:</label><br>
+            <div id="fieldsContainer" style="max-height:200px; overflow-y:auto; border:1px solid #ccc; padding:5px;"></div><br>
+            <button id="useDefaultBtn">Use Default</button>
+            <button id="clearBtn">Clear Selection</button>
+            <br><br>
+        </div>
+        <div style="text-align:right;">
+            <button id="submitBtn">Submit</button>
+            <button id="exportBtn" disabled>Export to CSV</button>
+        </div>
+        <div id="output"></div>
+    </div>
+
+    <script>
+        const submitBtn = document.getElementById('submitBtn');
+        const exportBtn = document.getElementById('exportBtn');
+        const outputDiv = document.getElementById('output');
+        const harInput = document.getElementById('harInput');
+        const urlSelect = document.getElementById('urlSelect');
+        const fieldSelector = document.getElementById('fieldSelector');
+        const fieldsContainer = document.getElementById('fieldsContainer');
+        const useDefaultBtn = document.getElementById('useDefaultBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        // confirmFieldsBtn removed
+
+        let selectedFields = [];
+        let selectedDisplay = [];
+        let defaultSelected = false;
+        const defaultFields = [
+            'severityName','state','vectorName','threatTypeName','activationName',
+            'zappInstance.name','zappInstance.version','zappInstance.zversion',
+            'device.os.name','device.os.version','device.model',
+            'zappInstance.externalTrackingId1','zappName','teamName','timestampInfo.timestamp'
+        ];
+        const defaultDisplay = [
+            'SEVERITY','STATUS','VECTOR','THREAT_TYPE','ACTIVATION_NAME',
+            'APP_NAME','APP_VERSION','SDK_VERSION','OS','OS_VERSION',
+            'DEVICE_MODEL','TRACKINGID1','APP_NAME','TEAM','TIME'
+        ];
+        let currentOutput = '';
+        let harMap = {}; // baseUrl -> array of response texts
+
+        harInput.addEventListener('change', e => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                try {
+                    const har = JSON.parse(reader.result);
+                    processHar(har);
+                } catch(err) {
+                    outputDiv.textContent = 'Invalid HAR: ' + err.message;
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        function processHar(har) {
+            harMap = {};
+            const entries = har.log && har.log.entries ? har.log.entries : [];
+            entries.forEach(entry => {
+                const url = entry.request && entry.request.url;
+                if (!url) return;
+                const base = url.split('?')[0];
+                const text = entry.response && entry.response.content && entry.response.content.text;
+                if (!text) return;
+                if (!harMap[base]) harMap[base] = [];
+                harMap[base].push(text);
+            });
+            urlSelect.innerHTML = '<option value="">Please select a URL</option>';
+            Object.keys(harMap).forEach(u => {
+                const opt = document.createElement('option');
+                opt.value = u;
+                opt.textContent = u;
+                urlSelect.appendChild(opt);
+            });
+            urlSelect.disabled = false;
+        }
+
+        // flatten object keys to dot-paths, ignoring array-valued properties
+        function extractPaths(obj, prefix='') {
+            let paths = [];
+            console.log(obj)
+            for (const key in obj) {
+                if (!obj.hasOwnProperty(key)) continue;
+                const full = prefix ? prefix + '.' + key : key;
+                const val = obj[key];
+                
+                // skip arrays altogether
+                if (Array.isArray(val) && key !== 'additionalPublicForensics') {
+                    continue;
+                }
+                if (val && typeof val === 'object') {
+                    // recurse into nested objects
+                    paths = paths.concat(extractPaths(val, full));
+                } else {
+                    paths.push(full);
+                }
+            }
+            return paths;
+        }
+
+        urlSelect.addEventListener('change', () => {
+            const sel = urlSelect.value;
+            if (!sel || !harMap[sel]) {
+                fieldSelector.style.display = 'none';
+                return;
+            }
+            const merged = {content: []};
+            harMap[sel].forEach(txt => {
+                try {
+                    const j = JSON.parse(txt);
+                    if (Array.isArray(j.content)) merged.content.push(...j.content);
+                } catch(_) {}
+            });
+            if (merged.content.length === 0) return;
+            const sample = merged.content[0];
+            
+            let paths = extractPaths(sample);
+            
+            paths.sort(); // alphabetical order
+            fieldsContainer.innerHTML = '';
+            paths.forEach(p => {
+                const label = document.createElement('label');
+                label.style.display = 'block';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.value = p;
+                label.appendChild(cb);
+                label.appendChild(document.createTextNode(' ' + p));
+                fieldsContainer.appendChild(label);
+            });
+            fieldSelector.style.display = 'block';
+            selectedFields = []; selectedDisplay = [];
+            defaultSelected = false;
+        });
+
+        useDefaultBtn.addEventListener('click', () => {
+            // check default boxes
+            Array.from(fieldsContainer.querySelectorAll('input[type=checkbox]')).forEach(cb => {
+                cb.checked = defaultFields.includes(cb.value);
+            });
+            defaultSelected = true;
+            selectedDisplay = defaultDisplay.slice();
+        });
+
+        clearBtn.addEventListener('click', () => {
+            Array.from(fieldsContainer.querySelectorAll('input[type=checkbox]')).forEach(cb => cb.checked = false);
+            defaultSelected = false;
+            selectedDisplay = [];
+        });
+
+        submitBtn.addEventListener('click', () => {
+            // read fields from checkbox list
+            selectedFields = Array.from(fieldsContainer.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.value);
+            // determine display names
+            if (defaultSelected && selectedFields.length > 0) {
+                // map each selected field to defaultDisplay by matching position in defaultFields
+                selectedDisplay = selectedFields.map(f => {
+                    const idx = defaultFields.indexOf(f);
+                    return idx !== -1 ? defaultDisplay[idx] : f.toUpperCase();
+                });
+            } else {
+                selectedDisplay = selectedFields.map(f => f.toUpperCase());
+            }
+            if (!selectedFields || selectedFields.length === 0) {
+                outputDiv.textContent = 'No columns selected';
+                exportBtn.disabled = true;
+                currentOutput = '';
+                return;
+            }
+            let text = '';
+            const sel = urlSelect.value;
+            if (sel && harMap[sel]) {
+                const merged = {content: []};
+                harMap[sel].forEach(txt => {
+                    try {
+                        const j = JSON.parse(txt);
+                        if (Array.isArray(j.content)) merged.content.push(...j.content);
+                    } catch(_) {}
+                });
+                text = JSON.stringify(merged);
+            }
+            let json;
+            try {
+                json = JSON.parse(text);
+            } catch (err) {
+                outputDiv.textContent = 'Invalid JSON: ' + err.message;
+                exportBtn.disabled = true;
+                currentOutput = '';
+                return;
+            }
+            const items = Array.isArray(json.content) ? json.content : [];
+            if (items.length === 0) {
+                outputDiv.textContent = 'No items found in content array.';
+                exportBtn.disabled = true;
+                currentOutput = '';
+                return;
+            }
+            // build CSV using selectedFields/displayHeaders
+            const headers = selectedFields.slice();
+            const displayHeaders = selectedDisplay.length === headers.length ? selectedDisplay.slice() : headers.map(h => h.toUpperCase());
+            const rows = items.map(item => {
+                const get = path => {
+                    return path.split('.').reduce((o, k) => (o && o[k] !== undefined) ? o[k] : '', item);
+                };
+                return headers.map(h => {
+                    let val = get(h);
+                    if (h === 'state') {
+                        const map = {1:'Pending',2:'Fixed',3:'Approved',4:'Resolved'};
+                        val = map[val] || val;
+                    }
+                    if (h === 'timestampInfo.timestamp' && val) {
+                        const utc = new Date(Number(val));
+                        const gmt8 = new Date(utc.getTime() + 8 * 60 * 60 * 1000);
+                        const pad = n => String(n).padStart(2,'0');
+                        let hours = gmt8.getUTCHours();
+                        const minutes = pad(gmt8.getUTCMinutes());
+                        const seconds = pad(gmt8.getUTCSeconds());
+                        const ampm = hours >= 12 ? 'PM' : 'AM';
+                        hours = hours % 12;
+                        if (hours === 0) hours = 12;
+                        const day = pad(gmt8.getUTCDate());
+                        const month = pad(gmt8.getUTCMonth()+1);
+                        const year = String(gmt8.getUTCFullYear()).slice(-2);
+                        val = `${day}/${month}/${year} ${pad(hours)}:${minutes}:${seconds} ${ampm}`;
+                    }
+                    return val;
+                });
+            });
+            const csvLines = [displayHeaders.join(',')];
+            rows.forEach(r => {
+                // escape values
+                const esc = v => {
+                    if (v === null || v === undefined) return '';
+                    const s = String(v).replace(/"/g, '""');
+                    return '"' + s + '"';
+                };
+                csvLines.push(r.map(esc).join(','));
+            });
+            const csvText = csvLines.join('\r\n');
+            outputDiv.textContent = csvText;
+            currentOutput = csvText;
+            exportBtn.disabled = false;
+        });
+
+        exportBtn.addEventListener('click', () => {
+            if (!currentOutput) return;
+            // convert to CSV (single cell)
+            const csvContent = 'data:text/csv;charset=utf-8,' +
+                encodeURIComponent(currentOutput);
+            const link = document.createElement('a');
+            link.setAttribute('href', csvContent);
+            link.setAttribute('download', 'output.csv');
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
+    </script>
+</body>
+</html>
